@@ -7,17 +7,127 @@
 // https://learn.adafruit.com/adafruit-spi-flash-sd-card
 // https://randomnerdtutorials.com/esp32-microsd-card-arduino/
 
+// see this for the tutorial:
+// https://community.appinventor.mit.edu/t/esp32-wifi-webserver-upload-file-from-app-to-esp32-sdcard-reader-littlefs/28126/2
+
 #include "FS.h"
 #include "SD.h"
 #include "SPI.h"
 
-//#include "SD-card-API.h"l
+//#include "SD-card-API.h"
 
 #include "mercator_secrets.c"
 
 const int beetleLed = 10;
-const uint8_t SD_CHIP_SELECT_PIN = GPIO_NUM_2;s
+const uint8_t SD_CHIP_SELECT_PIN = GPIO_NUM_2;
 uint8_t cardType = 0;
+
+
+#include <WiFiClient.h>
+#include <ESP32WebServer.h>
+#include <WiFi.h>
+#include <ESPmDNS.h>
+
+#include "LittleFS.h"
+
+String serverIndex = "<script src='https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js'></script>"
+"<form method='POST' action='#' enctype='multipart/form-data' id='upload_form'>"
+    "<input type='file' name='update'>"
+    "<input type='submit' value='Upload'>"
+"</form>"
+"<div id='prg'>progress: 0%</div>"
+"<script>"
+"$('form').submit(function(e){"
+    "e.preventDefault();"
+      "var form = $('#upload_form')[0];"
+      "var data = new FormData(form);"
+      " $.ajax({"
+            "url: '/update',"
+            "type: 'POST',"               
+            "data: data,"
+            "contentType: false,"                  
+            "processData:false,"  
+            "xhr: function() {"
+                "var xhr = new window.XMLHttpRequest();"
+                "xhr.upload.addEventListener('progress', function(evt) {"
+                    "if (evt.lengthComputable) {"
+                        "var per = evt.loaded / evt.total;"
+                        "$('#prg').html('progress: ' + Math.round(per*100) + '%');"
+                    "}"
+               "}, false);"
+               "return xhr;"
+            "},"                                
+            "success:function(d, s) {"    
+                "console.log('success!')"
+           "},"
+            "error: function (a, b, c) {"
+            "}"
+          "});"
+"});"
+"</script>";
+
+ESP32WebServer server(80);
+File root;
+bool opened = false;
+
+String printDirectory(File dir, int numTabs) {
+  String response = "";
+  dir.rewindDirectory();
+  
+  while(true) {
+     File entry =  dir.openNextFile();
+     if (! entry) {
+       // no more files
+       // Serial.println("**nomorefiles**");
+       break;
+     }
+     for (uint8_t i=0; i<numTabs; i++) {
+       Serial.print('\t');   // we'll have a nice indentation
+     }
+     // Recurse for directories, otherwise print the file size
+     if (entry.isDirectory()) {
+       printDirectory(entry, numTabs+1);
+     } else {
+       response += String("<a href='") + String(entry.name()) + String("'>") + String(entry.name()) + String("</a>") + String("</br>");
+     }
+     entry.close();
+   }
+   return String("List files:</br>") + response + String("</br></br> Upload file:") + serverIndex;
+}
+
+void handleRoot() {
+  root = LittleFS.open("/");
+  String res = printDirectory(root, 0);
+  server.send(200, "text/html", res);
+}
+
+bool loadFromSDCARD(String path){
+  path.toLowerCase();
+  String dataType = "text/plain";
+  if(path.endsWith("/")) path += "index.htm";
+
+  if(path.endsWith(".src")) path = path.substring(0, path.lastIndexOf("."));
+  else if(path.endsWith(".jpg")) dataType = "image/jpeg";
+  else if(path.endsWith(".txt")) dataType = "text/plain";
+  else if(path.endsWith(".zip")) dataType = "application/zip";  
+  Serial.println(dataType);
+  File dataFile = LittleFS.open(path.c_str());
+
+  if (!dataFile)
+    return false;
+
+  if (server.streamFile(dataFile, dataType) != dataFile.size()) {
+    Serial.println("Sent less data than expected!");
+  }
+
+  dataFile.close();
+  return true;
+}
+
+void handleNotFound(){
+  if(loadFromSDCARD(server.uri())) return;
+  Serial.println("SDCARD Not Detected");
+}
 
 void setup()
 {
@@ -37,7 +147,7 @@ void setup()
     Serial.println("Warming up...");
   }
   Serial.println("\nHere we go...");
-  
+   
   if(!SD.begin(SD_CHIP_SELECT_PIN))
   {
       Serial.println("Card Mount Failed");
@@ -52,11 +162,63 @@ void setup()
       return;
   }
 
+  WiFi.begin(ssid_1, password_1);
+
+// Wait for connection
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.print("Connected to ");
+  Serial.println(ssid_1);
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+  
+  Serial.println("Initialization done.");
+  //handle uri  
+  server.on("/", handleRoot);
+  server.onNotFound(handleNotFound);
+  
+  /*handling uploading file */
+  server.on("/update", HTTP_POST, [](){
+    server.sendHeader("Connection", "close");
+  },[](){
+    HTTPUpload& upload = server.upload();
+    if(opened == false){
+      opened = true;
+        root = LittleFS.open((String("/") + upload.filename).c_str(), FILE_WRITE); 
+
+      if(!root){
+        Serial.println("- failed to open file for writing");
+        return;
+      }
+    } 
+    if(upload.status == UPLOAD_FILE_WRITE){
+      if(root.write(upload.buf, upload.currentSize) != upload.currentSize){
+        Serial.println("- failed to write");
+        return;
+      }
+    } else if(upload.status == UPLOAD_FILE_END){
+      root.close();
+      Serial.println("UPLOAD_FILE_END");
+      opened = false;
+    }
+  });
+
+  server.begin();
+  Serial.println("HTTP Server started");
+  LittleFS.begin();
 }
 
 void loop() 
 {
+  server.handleClient();
 }
+
+
+
+
 
 // ----- I WANT THIS CODE TO BE RUNNING FROM SD-card-API.c
 // ----- but the Arduino IDE won't compile it... Help!
