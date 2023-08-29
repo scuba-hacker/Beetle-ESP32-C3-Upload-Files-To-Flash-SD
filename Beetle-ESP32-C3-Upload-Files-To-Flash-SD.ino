@@ -135,7 +135,7 @@ void setup()
 
   // LED flash - we're alive!
   Serial.begin(115200);
-  int warmUp=10;
+  int warmUp=20;
   
   while (warmUp--)
   {
